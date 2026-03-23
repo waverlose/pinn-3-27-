@@ -1,0 +1,46 @@
+# PINN-COMSOL 核心对标主控表 (Master Configuration)
+# 物理背景: 椎间盘三相多孔力学理论 (Triphasic Theory)
+# 过渡逻辑说明: T1=1 (NP中心), T1=0 (AF最边缘); 1-T1 代表从界面向外的归一化深度
+
+# === 区块一: 全局物理常数 (Global Constants) ===
+Category,Parameter,Value,Unit,Description
+Constants,Temp,310,K,绝对温度
+Constants,R_const,8.314,J/(mol*K),通用气体常数
+Constants,RT,2577.34,Pa*m3/mol,能量常数 (R*Temp)
+Constants,visco,1e-3,Pa*s,水的动力粘度
+Constants,cp_out,150,mol/m3,外部正离子浓度 (Bath)
+Constants,cn_out,150,mol/m3,外部负离子浓度 (Bath)
+Constants,c_total_out,300,mol/m3,外部总离子浓度 (对标 PHY_C_EXT)
+
+# === 区块二: 区域材料参数过渡 (Regional Properties) ===
+# 公式格式: Base + Delta * (1-T1)
+Category,Parameter,NP_Value,AF_Formula,Unit,Description
+Material,cfr,340,340 - 180 * (1-T1),mol/m3,固定电荷浓度 (FCD)
+Material,wsr,0.15,0.15 + 0.15 * (1-T1),-,初始含固率 (Solid volume fraction)
+Material,mu,0.06e6,(0.06 + 0.08 * (1-T1)) * 1e6,Pa,剪切模量 (Shear Modulus)
+Material,lambda,0.04e6,(0.04 + 0.13 * (1-T1)) * 1e6,Pa,拉梅常数 (Lame Constant)
+Material,alpha,0,(0 + 20 * (1-T1)) * 1e6,Pa,各向异性强度 (Fiber Stiffness)
+Material,theta,0,30,deg,纤维倾斜角 (AF区域)
+
+# === 区块三: 核心物理定律与应力模型 (Physics & Constitutive) ===
+Category,Model_Type,Formula_Logic,Description
+Constitutive,Matrix_Stress,Log-Hyperelastic (Neo-Hookean + Log Barrier),包含对数项 J-wsr 的刚度保护模型
+Constitutive,Fiber_Stress,0.5 * alpha * En^2 * (En > 0),两族对称只拉不压模型
+Pressure,Reference_Pr,RT * (c_total_r - c_total_out),初始平衡状态的参考渗透压差
+Pressure,Output_P,RT * (Ew + c_total) - pr,对标 COMSOL 的净孔隙压力 (Net Pore Pressure)
+Chemistry,Donnan_Eq,cp = 0.5*(cf + sqrt(cf^2 + 4*Ep*En)),基于电中性条件的离子平衡
+
+# === 区块四: 输运与渗透性能 (Transport & Permeability) ===
+Category,Parameter,Formula_or_Value,Unit,Description
+Transport,Perm_k_NP,2.48e-17 * (wa/ws)^2.15,m4/(N*s),NP 水力渗透率
+Transport,Perm_k_AF,3.10e-17 * (wa/ws)^2.2,m4/(N*s),AF 水力渗透率
+Transport,Ion_Radius_p,0.2e-9,m,正离子半径 (Stokes Radius)
+Transport,Ion_Radius_n,0.14e-9,m,负离子半径
+Transport,Diff_Model,D0 * exp(-Scale * (Radius/sqrt(k*visco))^Power),基于平均孔径的阻碍扩散模型
+
+# === 区块五: 数值保护与边界 (Safety & BCs) ===
+Category,Constraint,Logic,Description
+Safety,Porosity_Clamp,if(ws > 0.7 then wa = 0.3 else 1-ws),防止固体挤压导致数值爆炸
+Boundary,Side_BC,Dirichlet (mu_w=0 mu_ion=0),模拟开放浴液 (Open Bath)
+Boundary,NP_Surface,Dirichlet (mu_w=0 mu_ion=0),髓核表面与端板接触处为开放
+Boundary,AF_Surface,Neumann (No Flux),纤维环表面为不透水/溶质
