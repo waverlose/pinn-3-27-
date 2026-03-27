@@ -7,6 +7,10 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import sys
 import torch
 import numpy as np
+import warnings
+
+# 屏蔽无意义的显存分配器警告
+warnings.filterwarnings("ignore", category=UserWarning, message="expandable_segments not supported")
 from config import *
 from train import main as train_main
 from visualization import generate_all_plots

@@ -1,0 +1,319 @@
+你是一名精通 COMSOL Multiphysics 5.x/6.x LiveLink for MATLAB API 的
+计算生物力学专家，同时熟悉 Gu et al. (1998) 三相多孔弹性理论
+(Triphasic Poroelastic Model) 及其在椎间盘 (IVD) 中的应用。
+
+==========================================================================
+任务背景
+==========================================================================
+
+我有一个已实现的 PINN（物理信息神经网络）用于椎间盘三相力学仿真，
+现在需要你用 COMSOL LiveLink for MATLAB 构建等价的 FEM 基准模型，
+以便对 PINN 结果进行定量校验。
+
+要求你：
+1. 编写一套完整的 COMSOL LiveLink .m 脚本（可分文件）；
+2. 严格对标以下给出的 PINN 物理配置；
+3. 每个非平凡实现细节必须注释引用依据（论文/COMSOL手册条目）；
+4. 脚本结构清晰，按"几何→材料→物理→边界条件→求解→后处理→导出"顺序组织；
+5. 审查自身输出，列出所有与 PINN 之间的潜在差异点并逐条说明处理方式。
+
+==========================================================================
+几何配置 (Geometry)
+==========================================================================
+
+形状：半椭圆柱体（Hemi-elliptic Cylinder）
+  - 椭圆半轴 a = 20.0 mm（x方向），b = 15.0 mm（y方向）
+  - 高度 H = 10.0 mm（z方向，轴向）
+  - 坐标原点在椭圆中心，z 从 0 到 H
+
+区域划分：
+  - NP（髓核）：归一化椭圆半径 r_norm < 0.7
+    r_norm = sqrt((x/a)^2 + (y/b)^2)
+  - AF（纤维环）：0.7 <= r_norm <= 1.0
+  - NP/AF 材料边界为连续光滑过渡（五次 Hermite 插值，见材料参数部分）
+
+COMSOL 实现要求：
+  - 用 WorkPlane + Ellipse + Extrude 建模，不得手动导入几何
+  - 用 Cylinder（椭圆截面）减去内部小椭圆柱来区分 NP 和 AF 域，
+    或用空间插值函数（Analytic Function）实现连续过渡——后者更优先
+  - 提供对应 mphgeom 操作的完整 API 调用序列
+
+==========================================================================
+材料参数 (Material Parameters) — 严格对标 PINN config.py
+==========================================================================
+
+【过渡函数定义】（所有插值均基于此）
+  r_norm = sqrt((x/a)^2 + (y/b)^2)
+  t_af   = clamp((r_norm - 0.7) / 0.3, 0, 1)
+  alpha  = 1 - (6*t_af^5 - 15*t_af^4 + 10*t_af^3)   % 五次 Hermite，C2连续
+  % alpha=1 在 NP 中心，alpha=0 在 AF 外边界
+
+【弹性参数（线性化 Lamé 等效值，单位 MPa）】
+  lambda(x,y) = alpha * 0.04  + (1-alpha) * 0.17
+  mu(x,y)     = alpha * 0.06  + (1-alpha) * 0.14
+
+【固体体积分数 / 含水量】
+  wsr(x,y)  = alpha * 0.15 + (1-alpha) * 0.30   % 固体体积分数
+  phi0(x,y) = 1 - wsr(x,y)                       % 初始孔隙率
+
+【固定电荷密度 FCD（单位 mol/m^3 -> 注意单位换算）】
+  fcd_NP = 3.4e-7 mol/mm^3  (= 3.4e-4 mol/L)
+  fcd_AF(x,y) = alpha * fcd_NP + (1-alpha) * 1.6e-7
+  注：以上为 PINN 内部单位（mol/mm^3），COMSOL 使用 mol/m^3 需乘以 1e9
+
+【渗透率（依赖孔隙率的幂律模型）】
+  perm_a(x,y) = alpha * 2.48e-5 + (1-alpha) * 3.10e-5  % mm^4/(N·s)
+  perm_n(x,y) = alpha * 2.15    + (1-alpha) * 2.20
+  k(phi, ws) = perm_a * (phi / ws)^perm_n
+  说明：phi 为当前孔隙率（变形后），ws = (1-phi0)/J（固体比）
+
+【扩散参数（离子扩散率，基于孔径的 Renkin 模型）】
+  diff_a(x,y) = alpha * 1.25 + (1-alpha) * 1.29
+  diff_b(x,y) = alpha * 0.68 + (1-alpha) * 0.37
+  pore_r = sqrt(k)                                % 当前等效孔隙半径
+  D_p(x,y) = D_p0 * exp(-diff_a * (r_ion/pore_r / sqrt(eta))^diff_b)
+  D_p0 = 1.33e-3 mm^2/s,  r_ion = 0.2e-6 mm,  eta = 1e-3 Pa·s
+
+【离子参数】
+  R = 8314 J/(kmol·K),  T = 310 K,  RT = 2.577e6 J/kmol
+  c_ext = 1.5e-7 mol/mm^3（外部 NaCl 浓度）
+  注意：COMSOL 的 RT 单位需与浓度单位匹配，统一到 mm-N-s 体系
+
+==========================================================================
+本构模型 (Constitutive Model)
+==========================================================================
+
+【固相：Neo-Hookean 超弹性 + 渗透压耦合】
+
+变形梯度张量 F，J = det(F)
+左 Cauchy-Green 张量 B = F * F^T
+
+弹性 Cauchy 应力（各向同性基础项）：
+  p_el = lambda * phi0 * (J-1) / max(J - (1-phi0), 0.005)
+  sigma_e_ij = mu/J * B_ij + p_el * delta_ij
+  注：此处 p_el 为体积弹性压力，不是孔隙液压
+
+渗透压（Donnan 平衡）：
+  cf = fcd * phi0 / (phi * J + 1e-12)
+  c_plus = 0.5 * (cf + sqrt(cf^2 + 4*c_ext^2))
+  c_tot = 2 * c_plus - cf
+  p_osm = RT * (c_tot - 2*c_ext)           % 当前渗透压
+
+  参考态（J=1, phi=phi0）：
+  cf_ref = fcd
+  cp_ref = 0.5*(cf_ref + sqrt(cf_ref^2 + 4*c_ext^2))
+  p_osm_ref = RT*(2*cp_ref - cf_ref - 2*c_ext)
+
+净孔隙液压（Pore Pressure）：
+  p_pore = mu_w + (p_osm - p_osm_ref)
+  其中 mu_w 为模型直接输出的化学势（对应 COMSOL 的 pore pressure 变量）
+
+总 Cauchy 应力：
+  sigma_ij = sigma_e_ij - p_pore * delta_ij
+
+【各向异性纤维强化（Annulus Fibrosus）】
+
+纤维角：θ = 30° = π/6（相对于水平切向方向，COMSOL 中 ±30°两族）
+
+纤维局部坐标系（每点根据位置计算）：
+  切向基向量 e_t = (-y, x, 0) / r_xy   （r_xy = sqrt(x^2+y^2)）
+  纤维方向   a_0 = cos(θ)*e_t ± sin(θ)*e_z
+
+纤维应变不变量：
+  lambda_f^2 = a_0 · (B · a_0) = |F·a_0|^2
+  E_N = 0.5*(lambda_f^2 - 1)             % Green-Lagrange 纤维应变
+
+纤维应力贡献（仅拉伸激活，E_N > 0）：
+  alpha_f = MAT_FIBER_ALPHA_MAX * t_raw  % t_raw = clamp((r_norm-0.7)/0.3, 0,1)
+             % alpha_f=0 at NP boundary, =20.0 MPa at outer AF boundary
+  sigma_f_ij = alpha_f * E_N * H(E_N) / J * (F·a_0)_i * (F·a_0)_j
+  （对两族纤维 ± 求和，乘以 m_af_weight = t_smooth）
+
+在 COMSOL 中建议使用：
+  - Hyperelastic Material + Fiber Reinforcement 节点（若版本支持）
+  - 或 User Defined Strain Energy Density + External Stress 节点
+  引用：Gu et al. (1998) JBME, Holzapfel & Ogden (2010) Phil Trans R Soc
+
+【流体相：广义 Darcy 定律（参考系下，Piola 映射）】
+
+流体通量（在参考构型中）：
+  J_w = -k(phi, ws) * Adj(F)^T · grad_X(mu_w)
+  其中 Adj(F) 为 F 的伴随矩阵（= J * F^{-T}）
+
+连续性方程（质量守恒）：
+  div_X(J_w) = 0
+
+在 COMSOL 中对应：Poroelasticity / Darcy's Law 接口
+  - 注意 COMSOL 默认在当前构型求解，需确认是否需要开启几何非线性（Large Deformation）
+  - 建议启用 Stationary + Large Deformation 以匹配 PINN 的有限变形框架
+
+【离子相：对流-扩散方程（参考系下）】
+
+离子通量（Na+ 为代表）：
+  J_ion = c_plus * J_w - phi * D_p * Adj(F)^T · grad_X(mu_ion)
+
+守恒方程：
+  div_X(J_ion) = 0
+
+在 COMSOL 中对应：Transport of Diluted Species 接口，
+  启用 Convection + Migration in Electric Field（如需），
+  或自定义化学势驱动的 Flux 表达式
+
+==========================================================================
+边界条件 (Boundary Conditions) — 严格对标 PINN train.py / solver.py
+==========================================================================
+
+【底面 z=0】
+  力学：u=v=w=0（全约束 Dirichlet）
+  化学（NP 区，r_norm < 0.7）：mu_w=0, mu_ion=0（Dirichlet）
+  化学（AF 区，r_norm > 0.7）：n·J_w=0, n·J_ion=0（Neumann 无通量）
+  过渡权重：alpha_smooth 平滑插值
+
+【顶面 z=H】
+  力学：u=v=0（水平固定），施加法向压缩应力 sigma_zz = -BC_TOP_PRESSURE = -0.3 MPa
+  注意：PINN 中的 BC_TOP_PRESSURE 单位为 MPa，对应 COMSOL 的 Boundary Load
+  化学（NP 区）：mu_w=0, mu_ion=0（Dirichlet）
+  化学（AF 区）：n·J_w=0, n·J_ion=0（Neumann 无通量）
+
+【侧面（椭圆外边界）】
+  力学：法向牵引力 = 0（Traction-Free，自然边界条件）
+       注：T_n = sigma · n = 0，对 x 和 y 分量均施加
+  化学：mu_w=0, mu_ion=0（Dirichlet，对应外部浴液平衡条件）
+       Robin 系数 beta=0.5（若 COMSOL 使用 Robin BC，对应 PINN 的 LOSS_WEIGHT_SIDE_CHEM_SCALE）
+
+==========================================================================
+求解设置 (Study Settings)
+==========================================================================
+
+- 求解类型：Stationary（稳态）
+- 非线性求解：Newton-Raphson，启用 Automatic damping
+- 建议初始化顺序（对应 PINN 课程学习）：
+    Step 1：仅力学，关闭化学耦合（预压缩）
+    Step 2：加入渗透压，ramping sigma_osm from 0 to 1
+    Step 3：全耦合稳态
+- 网格：六面体结构化网格或四面体网格，边长约 1-2 mm
+         NP/AF 过渡区细化（边长 0.5 mm）
+- 收敛准则：相对残差 < 1e-6
+- 若使用 Parametric Sweep 做 ramp，指定 ramp 参数步数 ≥ 10
+
+==========================================================================
+导出变量 (Export for PINN Comparison)
+==========================================================================
+
+在 PINN 的坐标网格上（VIS_GRID_NX=100, VIS_GRID_NZ=50）导出以下变量：
+  1. 位移场：u, v, w (mm)
+  2. Jacobian 行列式：J = det(F)
+     期望范围：NP中心 J~0.85-0.92（含水膨胀），边界 J~1.0
+  3. 孔隙液压：p_pore = mu_w + (p_osm - p_osm_ref) (MPa → kPa)
+  4. 固定电荷密度分布：fcd (mol/mm^3)
+  5. 当前孔隙率：phi
+  6. 离子浓度：c_plus (mol/mm^3)
+  7. 渗透压：p_osm (MPa)
+  8. 应力分量：sigma_xx, sigma_yy, sigma_zz (MPa)
+
+导出格式：CSV 或 .mat 文件，坐标列为 x,y,z（mm）
+
+MATLAB 脚本中使用 mpheval / mphinterp 在自定义坐标点提取数据。
+
+==========================================================================
+脚本结构要求
+==========================================================================
+
+请将脚本拆分为以下文件：
+
+1. `setup_geometry.m`
+   - 初始化 COMSOL model 对象
+   - 创建椭圆柱体几何
+   - 定义 NP/AF 分组（Domain Groups 或 Selections）
+   - 创建空间解析函数（Alpha, FCD, lambda, mu, phi0, perm_a, perm_n 等）
+
+2. `setup_physics.m`
+   - 添加 Solid Mechanics（Hyperelastic）物理接口
+   - 添加 Darcy's Law 物理接口
+   - 添加 Transport of Diluted Species 物理接口
+   - 配置全耦合 Multiphysics 节点
+   - 定义纤维应力 User-Defined 贡献
+
+3. `setup_bc.m`
+   - 按上述 BC 描述逐面配置力学和化学边界条件
+   - 实现 NP/AF 过渡区的混合 Dirichlet/Neumann 边界
+
+4. `setup_mesh_and_study.m`
+   - 生成网格
+   - 配置求解步骤（含 ramp 策略）
+   - 运行求解
+
+5. `export_results.m`
+   - 在指定坐标网格上插值提取所有物理量
+   - 输出 CSV / .mat 文件，列名与 PINN visualization 对应
+
+6. `run_all.m`
+   - 顺序调用以上所有文件的主入口脚本
+
+==========================================================================
+审查清单（AI 自检要求）
+==========================================================================
+
+完成脚本后，你必须在输出末尾提供一个"差异分析表"，逐项检查：
+
+| 项目 | PINN 实现 | COMSOL 实现 | 差异/风险 | 处理方案 |
+|------|-----------|-------------|-----------|----------|
+| 变形框架 | 有限变形 (F, J) | 需确认开启 Large Deformation | ... | ... |
+| Piola 映射 | 显式 Adj(F) 映射 | COMSOL 内部处理 | ... | ... |
+| 渗透压参考态 | p_osm_ref 在 J=1 计算 | COMSOL 初始条件 | ... | ... |
+| 纤维激活条件 | H(E_N) 拉伸才激活 | 需 if 条件或 max(0,EN) | ... | ... |
+| FCD 单位 | mol/mm^3 | mol/m^3 需×1e9 | ... | ... |
+| 渗透率单位 | mm^4/(N·s) | m^4/(Pa·s) | ... | ... |
+| 边界化学条件 | mu_w=0 (化学势) | COMSOL 中应映射到 p_pore | ... | ... |
+| 顶部压缩 | sigma_zz=-0.3 MPa | Boundary Load (压力方向确认) | ... | ... |
+| 纤维方向计算 | 逐点计算切向向量 | COMSOL 坐标系/Interpolation | ... | ... |
+| 侧面 Robin BC | beta=0.5 | 实现方式 | ... | ... |
+
+==========================================================================
+物理常数汇总（PINN config.py 原始值，单位说明）
+==========================================================================
+
+R  = 8314 J/(kmol·K)        % 通用气体常数
+T  = 310 K                  % 生理温度
+RT = 2577340 J/kmol         % = 2.577 MPa·mm^3/nmol（需单位换算）
+
+c_ext   = 1.5e-7 mol/mm^3   % 外部 NaCl 浓度（= 0.15 mol/L）
+eta     = 1e-3 Pa·s          % 流体粘度
+r_Na+   = 0.2e-6 mm          % Na+ 离子半径
+r_Cl-   = 0.14e-6 mm         % Cl- 离子半径
+D_Na0   = 1.33e-3 mm^2/s    % Na+ 自由扩散系数
+D_Cl0   = 1.84e-3 mm^2/s    % Cl- 自由扩散系数
+
+MAT_FIBER_ALPHA_MAX = 20.0 MPa   % 最大纤维刚度系数（AF 外边界）
+MAT_FIBER_THETA     = 30°        % 纤维倾角（±两族）
+
+BC_TOP_PRESSURE = 0.3 MPa        % 顶面施加的压缩应力
+BC_TOP_COMPRESSION = 0.1         % （位移比例参考，以 BC_TOP_PRESSURE 为主）
+
+==========================================================================
+关键参考文献（脚本注释中须引用）
+==========================================================================
+
+[1] Gu, W.Y., Lai, W.M., Mow, V.C. (1998). A mixture theory for charged-hydrated
+    soft tissues containing multi-electrolytes. JBME 120(2):169-180.
+[2] Holzapfel, G.A., Ogden, R.W. (2010). Constitutive modelling of arteries.
+    Phil Trans R Soc A 368:3445-3475.
+[3] Shirazi-Adl, A. et al. (1986). Stress analysis of the lumbar disc-body unit
+    in compression. Spine 11(2):141-149.
+[4] COMSOL Multiphysics Reference Manual (v6.x): Poroelasticity, Hyperelastic
+    Material, Transport of Diluted Species with Convection.
+[5] Raissi, M., Perdikaris, P., Karniadakis, G.E. (2019). Physics-informed neural
+    networks. JCP 378:686-707.
+
+==========================================================================
+额外约束
+==========================================================================
+
+1. 所有 API 调用使用 COMSOL LiveLink for MATLAB 5.6+ 兼容语法
+   （model.component, model.physics, model.mesh, model.study API）
+2. 禁止使用 GUI 录制的 mph 文件导入，所有操作必须纯代码实现
+3. 每处涉及单位换算必须显式注释，不允许隐含换算
+4. 若某个物理特性 COMSOL 标准接口无法直接实现，
+   必须给出基于 Global Equations 或 Weak Form PDE 的替代方案
+5. 脚本中所有数值参数必须通过顶部 Parameters 节（model.param.set）统一管理，
+   禁止在物理/BC节点中硬编码数值

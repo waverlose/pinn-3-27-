@@ -54,7 +54,7 @@ class VisualizerGUI:
         self.model_combo.pack(fill="x", padx=5)
 
         # 3. 后处理选项 (合三为一核心区)
-        frame_opt = ttk.LabelFrame(self.root, text=" 3. 后处理生成内容选择 ", padding=10)
+        frame_opt = ttk.LabelFrame(self.root, text=" 3. 内容选择 ", padding=10)
         frame_opt.pack(fill="x", padx=20, pady=10)
         
         # 选项变量

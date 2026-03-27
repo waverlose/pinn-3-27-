@@ -1,4 +1,3 @@
-
 import os
 import sys
 import torch
@@ -30,7 +29,7 @@ class ModelRefiner:
             "normals": side_norms.to(self.device)
         }
 
-    def execute(self, adam_steps: int = 500, lbfgs_steps: int = 500):
+    def execute(self, adam_steps: int = 500, lbfgs_steps: int = 1000):
         try:
             torch.cuda.empty_cache()
             self.solver.model.load(self.checkpoint_path)
@@ -77,6 +76,6 @@ class ModelRefiner:
             sys.exit(1)
 
 if __name__ == "__main__":
-    TARGET_DIR = r"ivd_results\run_20260322_115136"
-    refiner = ModelRefiner(TARGET_DIR, "model_final.pth")
+    TARGET_DIR = r"ivd_results\run_20260323_154859"
+    refiner = ModelRefiner(TARGET_DIR, "model_crash.pth")
     refiner.execute()

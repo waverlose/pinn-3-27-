@@ -237,7 +237,7 @@ def generate_comsol_benchmark_figures(solver, save_dir, suffix="", gen_deformed=
     comsol_style_plot("6_含水量_wa", data_dict["Phi"], "实时含水量 (Porosity)", "-", 'Blues')
     comsol_style_plot("6_体积比_J_solid", data_dict["J_solid"], "固相体积比 (J_solid)", "-", 'Spectral_r')
     comsol_style_plot("7_固定电荷密度_FCD", data_dict["FCD"], "固定电荷密度 (FCD)", "mM", 'YlGn')
-    comsol_style_plot("8_阳离子浓度_Cp", data_dict["Cation"], "阳离子浓度 (cp)", "mM", 'RdPu')
+    comsol_style_plot("8_阳离子浓度_cp", data_dict["Cation"], "阳离子浓度 (cp)", "mM", 'RdPu')
     
     # 7. 变形网格图
     plt.figure(figsize=(8, 7), dpi=200)
@@ -333,10 +333,7 @@ def generate_all_plots(solver, save_dir, suffix="", gen_deformed=True, gen_undef
     """
     统一可视化入口
     """
-    if solver.loss_history.get('total'): 
-        try: plot_loss_history(solver.loss_history, save_dir)
-        except: pass
-    generate_comsol_benchmark_figures(solver, save_dir, suffix=suffix, 
+    generate_comsol_benchmark_figures(solver, save_dir, suffix=suffix,
                                       gen_deformed=gen_deformed, gen_undeformed=gen_undeformed, gen_vtk=gen_vtk)
     # 调用新增的 J 径向分布图功能
     plot_j_radial(solver, save_dir, suffix=suffix)

@@ -212,14 +212,14 @@ def export_results(model_path, save_dir=None):
     # 顶面应力
     top_pts = top.to(DEVICE).requires_grad_(True)
     with torch.enable_grad():
-        _, _, _, _, _, st, _, _, _, _, _, _ = solver.compute_physics(top_pts, return_pde=False)
+        _, _, _, _, _, st, _, _, _, _, _, _, _ = solver.compute_physics(top_pts, return_pde=False)
         tzz_top = st[2].detach().cpu().numpy().flatten()
     bc_lines.append(f"顶面Tzz: 均值={tzz_top.mean():.4f} MPa  目标={-BC_TOP_PRESSURE:.4f} MPa  误差={abs(tzz_top.mean()+BC_TOP_PRESSURE):.4f}")
 
     # 侧边压力
     side_pts = side.to(DEVICE).requires_grad_(True)
     with torch.enable_grad():
-        _, _, _, _, _, _, _, _, _, _, _, p_side = solver.compute_physics(side_pts, return_pde=False)
+        _, _, _, _, _, _, _, _, _, _, _, p_side, _ = solver.compute_physics(side_pts, return_pde=False)
         p_side_kpa = p_side.detach().cpu().numpy().flatten() * 1000.0
     bc_lines.append(f"侧边压力 (应≈0): 均值={p_side_kpa.mean():.1f} kPa  最大={p_side_kpa.max():.1f} kPa")
 
