@@ -160,14 +160,18 @@ class VisualizerGUI:
             
             # 2. 加载权重
             self.log("💾 正在载入模型权重...")
-            state_dict = torch.load(model_path, map_location=DEVICE)
-            
-            # 智能兼容加载
             try:
-                solver.model.load_state_dict(state_dict)
-            except:
-                self.log("⚠️ 权重结构不完全一致，尝试松散加载模式...")
-                solver.model.load_state_dict(state_dict, strict=False)
+                # 统一使用 Solver 的加载逻辑，支持复合检查点
+                ep = solver.load_checkpoint(model_path)
+                self.log(f"✅ 权重载入成功 (记录轮次: {ep})")
+            except Exception as e:
+                self.log(f"⚠️ 权重加载异常: {e}")
+                # 最后的兜底：尝试直接加载（兼容旧版纯权重文件）
+                try:
+                    solver.model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+                    self.log("ℹ️ 已通过松散模式强制载入")
+                except:
+                    raise RuntimeError("无法识别的权重格式")
             
             # 3. 创建专属后处理子文件夹 (对标 run_post.py)
             from datetime import datetime

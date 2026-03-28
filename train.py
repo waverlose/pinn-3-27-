@@ -240,9 +240,10 @@ def train_model_from(solver, save_dir, start_epoch, logger):
             # ====================================================================
             solver.set_curriculum_params(osmotic_ramp=osmotic_ramp, chem_ramp=chem_ramp, barrier_ramp=barrier_ramp)
 
-            # 权重更新：在全耦合阶段开始更新
+            # 权重更新：在全耦合阶段开始按频率更新
             uw = (epoch >= 8000 and epoch % 10 == 0)
 
+            # 调用重构后的 train_step (内部已处理权重更新)
             loss_t, pde_val, bc_val = solver.train_step(
                 TRAIN_BATCH_DOM, TRAIN_BATCH_BC, target_disp_ratio, pts_cache, True, update_weights=uw, epoch=epoch
             )
@@ -296,11 +297,13 @@ def train_model_from(solver, save_dir, start_epoch, logger):
     # ========================================================================
     logger.info("开始L-BFGS二阶优化...")
     print(f"\nL-BFGS 二阶优化...")
-    for i in range(100):
+    for i in range(500):
+        # 显式更新心跳，防止误报
+        heartbeat.update(15000 + i)
         lbfgs_loss = solver.train_step_lbfgs(TRAIN_BATCH_DOM, TRAIN_BATCH_BC, 1.0, pts_cache, True)
         if i % 10 == 0:
             logger.info(f"L-BFGS step {i}: loss={lbfgs_loss:.4e}")
-            print(f" L-BFGS [步数 {i}/100] 损失: {lbfgs_loss:.2e}")
+            print(f" L-BFGS [步数 {i}/500] 损失: {lbfgs_loss:.2e}")
 
     # 停止心跳监控
     heartbeat.stop()

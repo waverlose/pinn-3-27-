@@ -30,8 +30,9 @@ def main():
     print(f"Loading Model: {model_path}")
     solver = Solver()
     try:
-        solver.model.load_state_dict(torch.load(model_path, map_location=DEVICE))
-        print("Model weights loaded successfully.")
+        # 使用 Solver 内置的加载方法，它能正确解包复合检查点
+        start_epoch = solver.load_checkpoint(model_path)
+        print(f"Model weights loaded successfully (from epoch {start_epoch}).")
     except Exception as e:
         print(f"Failed to load weights: {e}")
         return

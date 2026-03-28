@@ -104,37 +104,43 @@ def generate_comsol_benchmark_figures(solver, save_dir, suffix="", gen_deformed=
     print(f"\n[Post-Process]  {suffix}...")
     
     # 1. 准备网格
-    # 确保 ramp 参数已达到稳态以进行可视化
-    old_params = (solver.osmotic_ramp, solver.chem_ramp, solver.barrier_ramp)
-    solver.set_curriculum_params(osmotic_ramp=1.0, chem_ramp=1.0, barrier_ramp=1.0)
-    
+    # 增加微小偏移 eps 避开边界奇异点
+    eps = 1e-4
     nx, nz = 100, 100
-    x_v = torch.linspace(0, GEO_A, nx)
-    z_v = torch.linspace(0, GEO_H, nz)
+    x_v = torch.linspace(eps, GEO_A - eps, nx)
+    z_v = torch.linspace(eps, GEO_H - eps, nz)
     X, Z = torch.meshgrid(x_v, z_v, indexing='ij')
     pts = torch.stack([X.flatten(), torch.zeros_like(X.flatten()), Z.flatten()], dim=1).to(DEVICE)
     pts.requires_grad_(True)
     
     # 2. 物理场推断
     with torch.enable_grad():
+        # 构造 X-Z 剖面 (Y=0)
         out = solver.model(pts)
-        u, v, w = out[:, 0:1], out[:, 1:2], out[:, 2:3]
+        # 修正位移提取：在 Y=0 处，U_r 就是 u，W_z 就是 w
+        u_raw, v_raw, w_raw = out[:, 0:1], out[:, 1:2], out[:, 2:3]
         
+        # 检查数值范围 (调试用)
+        print(f"   [Debug] Ur range: [{u_raw.min():.2e}, {u_raw.max():.2e}], Wz range: [{w_raw.min():.2e}, {w_raw.max():.2e}]")
+
         # --- 核心修正：直接从位移梯度计算 J (Jacobian) ---
         ones_v = torch.ones((pts.shape[0], 1), device=DEVICE)
         def vgrad_v(val): return grad(val, pts, ones_v, create_graph=True, retain_graph=True)[0]
-        gu, gv, gw = vgrad_v(u), vgrad_v(v), vgrad_v(w)
+        gu, gv, gw = vgrad_v(u_raw), vgrad_v(v_raw), vgrad_v(w_raw)
         F11, F12, F13 = 1.0+gu[:,0:1], gu[:,1:2], gu[:,2:3]
         F21, F22, F23 = gv[:,0:1], 1.0+gv[:,1:2], gv[:,2:3]
         F31, F32, F33 = gw[:,0:1], gw[:,1:2], 1.0+gw[:,2:3]
         J_direct = torch.abs(F11*(F22*F33-F23*F32) - F12*(F21*F33-F23*F31) + F13*(F21*F32-F22*F31))
 
-        # 推断其他物理场 - 修正解包至 13 位
-        _, _, _, _, _, s_tuple, p_real, cF, k_perm, wa_phys, _, p_compare_calc, _ = solver.compute_physics(pts, return_pde=False, enable_chem=True)
-        # 修正解包顺序: (s11, s22, s33, s12, s13, s23)
+        # 推断其他物理场 - 严格对标 v4 版 solver.compute_physics 返回值顺序 (12位)
+        # res: (res_mx, res_my, res_mz, res_mw, res_mi, (s11,s22,s33,s12,s13,s23), p_real, cf, wa, zeros, p_compare, J)
+        res_phys = solver.compute_physics(pts, return_pde=True, enable_chem=True)
+        s_tuple = res_phys[5]
         s11, s22, s33, s12, s13, s23 = s_tuple
-        # 补全 S_theta (Hoop Stress): 轴对称下 s22 对应 s_theta_theta
-        s_theta = s22
+        cF = res_phys[7]
+        wa_phys = res_phys[8]
+        p_compare_calc = res_phys[10]
+        J_direct = res_phys[11]
         
         _, _, phi0, fcd0, _, _, _, _, alpha_map = solver.gm.get_material_params(pts[:, 0:1], pts[:, 1:2])
         c_pos = 0.5 * (cF + torch.sqrt(cF**2 + 4 * PHY_C_EXT**2))        
@@ -145,9 +151,9 @@ def generate_comsol_benchmark_figures(solver, save_dir, suffix="", gen_deformed=
     # 3. 数据转 Numpy
     def tnp(t): return t.detach().cpu().numpy().reshape(nx, nz)
     data_dict = {
-        "X": tnp(X), "Z": tnp(Z), "U_r": tnp(u), "W_z": tnp(w),
-        "S_rr": tnp(s11), "S_zz": tnp(s33), "S_rz": tnp(s13), "S_theta": tnp(s_theta), "S_VM": tnp(vm),
-        "P_pore": tnp(p_compare_calc) * 1000.0, # 统一为全量孔隙压力 (kPa)
+        "X": tnp(X), "Z": tnp(Z), "U_r": tnp(u_raw), "W_z": tnp(w_raw),
+        "S_rr": tnp(s11), "S_zz": tnp(s33), "S_rz": tnp(s13), "S_theta": tnp(s22), "S_VM": tnp(vm),
+        "P_pore": tnp(p_compare_calc) * 1000.0, 
         "Phi": tnp(wa_phys), "J_solid": tnp(J_direct), "J": tnp(J_direct),
         "FCD": tnp(cF) * 1e9, "Cation": tnp(c_pos) * 1e9, "Alpha": tnp(alpha_map)
     }
